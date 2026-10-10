@@ -1,0 +1,13 @@
+/build/
+/dist/
+/tools/
+/test-output/
+.vs/
+out/
+CMakeUserPresets.json
+.env
+.env.*
+*.face
+*.credential
+*.user
+*.pdb
