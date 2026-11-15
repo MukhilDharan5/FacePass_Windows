@@ -24,6 +24,7 @@ struct Notifications {
 class Credential final : public ICredentialProviderCredential2 {
   std::atomic<ULONG> refs_{1};
   std::wstring sid_;
+  bool unlockWorkstation_=false;
   std::wstring text_=L"Recognition demonstration only. Use Windows PIN/password to sign in.";
   ICredentialProviderCredentialEvents* events_=nullptr;
   ICredentialProviderCredentialEvents2* events2_=nullptr;
@@ -84,7 +85,7 @@ class Credential final : public ICredentialProviderCredential2 {
     });
   }
 public:
-  explicit Credential(std::wstring sid,std::weak_ptr<Notifications> notifications):sid_(std::move(sid)),notifications_(std::move(notifications)) {
+  explicit Credential(std::wstring sid,std::weak_ptr<Notifications> notifications,bool unlockWorkstation):sid_(std::move(sid)),unlockWorkstation_(unlockWorkstation),notifications_(std::move(notifications)) {
     ++objects;
     WNDCLASSW wc{}; wc.lpfnWndProc=wndproc; wc.hInstance=module; wc.lpszClassName=L"FacePassProviderStatus";
     RegisterClassW(&wc);
@@ -158,7 +159,7 @@ public:
         auto result=call(request);
         trace(L"one-use approval consumed; credential received");
         serializedNonce_=ticket_.nonce;ticket_={};
-        auto packed=pack_windows_credential(result.windowsCredential);
+        auto packed=pack_windows_credential(result.windowsCredential,unlockWorkstation_);
         struct Wipe {std::vector<BYTE>& data;~Wipe(){SecureZeroMemory(data.data(),data.size());}} wipe{packed};
         auto buffer=static_cast<BYTE*>(CoTaskMemAlloc(packed.size()));if(!buffer)return E_OUTOFMEMORY;
         std::memcpy(buffer,packed.data(),packed.size());
@@ -241,7 +242,7 @@ public:
       for(size_t i=0;same&&i<sids.size();++i)same=credentials_[i]->sid()==sids[i];
       if(same)return S_OK;
       clear();
-      for(const auto& sid:sids) {auto c=new(std::nothrow) Credential(sid,notifications_);if(!c){clear();return E_OUTOFMEMORY;}credentials_.push_back(c);if(notifications_->events)c->start_automatic();}
+      for(const auto& sid:sids) {auto c=new(std::nothrow) Credential(sid,notifications_,scenario_==CPUS_UNLOCK_WORKSTATION);if(!c){clear();return E_OUTOFMEMORY;}credentials_.push_back(c);if(notifications_->events)c->start_automatic();}
     }catch(...){clear();return E_OUTOFMEMORY;}return S_OK;
   }
 };

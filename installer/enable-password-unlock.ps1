@@ -15,7 +15,7 @@ if ((Get-ItemProperty -LiteralPath $taskOptions -Name PasswordlessUnlock -ErrorA
 $taskLsaKey='HKLM:\SYSTEM\CurrentControlSet\Control\Lsa'
 $taskPackages=@((Get-ItemProperty -LiteralPath $taskLsaKey -Name 'Authentication Packages').'Authentication Packages')
 Write-Output 'Preflight passed: installs only a Credential Provider. Windows authentication packages and LSA protection remain unchanged.'
-if ($PreflightOnly -or -not $PSCmdlet.ShouldProcess('FacePass on this laptop','Enable face unlock using a saved encrypted Microsoft-account password')) { return }
+if ($PreflightOnly -or -not $PSCmdlet.ShouldProcess('FacePass on this laptop','Enable face unlock using a saved encrypted Windows account password')) { return }
 $taskProviderKey='HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{A528A337-5D76-4B10-89F8-7B476F2BA491}'
 $taskExisted=Test-Path -LiteralPath $taskProviderKey
 $taskPrevious=(Get-ItemProperty -LiteralPath $taskOptions -Name PasswordBackedUnlock -ErrorAction SilentlyContinue).PasswordBackedUnlock
@@ -32,4 +32,4 @@ try {
     if (-not $taskExisted) { & (Join-Path $env:windir 'System32\regsvr32.exe') /u /s $taskProvider }
     throw
 }
-Write-Output 'Face unlock enabled. Open installed Settings, save your Microsoft-account password, enroll your face, and use native PIN/password once after service startup before testing the FacePass tile.'
+Write-Output 'Face unlock enabled. Open installed Settings, save your local or Microsoft-account password, enroll your face, and use native PIN/password once after service startup before testing the FacePass tile.'

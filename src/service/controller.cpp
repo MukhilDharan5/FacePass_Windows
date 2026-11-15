@@ -16,7 +16,7 @@ Response Controller::snapshot(const std::wstring& sid) {
   r.cameraActive=busy_&&sid==activeSid_;
   auto it=outcomes_.find(sid);
   if(it!=outcomes_.end()) { r.phase=it->second.phase; r.similarity=it->second.similarity; r.progress=it->second.progress; set_message(r,it->second.message); }
-  else set_message(r,r.passwordBackedBackend?L"Face unlock uses the saved encrypted Microsoft-account password.":r.backendAvailable?L"Ready. Passwordless unlock requires a locked native console session.":L"Ready. Face recognition can be tested; passwordless backend is not enabled/loaded.");
+  else set_message(r,r.passwordBackedBackend?L"Face unlock uses the saved encrypted Windows account password.":r.backendAvailable?L"Ready. Passwordless unlock requires a locked native console session.":L"Ready. Face recognition can be tested; passwordless backend is not enabled/loaded.");
   if(r.config.mode==Mode::Off && !r.cameraActive) { r.phase=Phase::Disabled; set_message(r,L"Face scanning is off. Webcam is idle. Windows PIN/password remains available."); }
   auto retry=retries_.find(sid);
   if(retry!=retries_.end()&&!retry->second.allowed(std::chrono::steady_clock::now())) { r.phase=Phase::Cooldown; set_message(r,L"Retry limit reached. Wait "+std::to_wstring(retry->second.remaining(std::chrono::steady_clock::now()))+L" seconds. Use Windows PIN/password."); }
@@ -94,7 +94,7 @@ Response Controller::handle(const Caller& caller,const Request& request) {
         DWORD unlockSession=0xffffffff;
         if(caller.role==ClientRole::Provider && backend()) {
           if(password_unlock_enabled()&&!store_.credential_saved(sid)) {
-            r.error=ERROR_NOT_FOUND;set_message(r,L"Save your Microsoft-account password in FacePass Settings before using face unlock.");break;
+            r.error=ERROR_NOT_FOUND;set_message(r,L"Save your Windows account password in FacePass Settings before using face unlock.");break;
           }
           if(caller.session!=WTSGetActiveConsoleSessionId() || !nativeSessions_.contains(caller.session)
               || nativeSessions_.at(caller.session)!=sid || !lockedSessions_.contains(caller.session)
@@ -125,7 +125,7 @@ Response Controller::handle(const Caller& caller,const Request& request) {
       if(busy_) {r.error=ERROR_BUSY;break;}
       if(sid!=request.windowsCredential.sid) {r.error=ERROR_ACCESS_DENIED;break;}
       {auto verified=verify_windows_credential(request.windowsCredential);store_.credential(sid,request.windowsCredential);}
-      grants_.revoke(sid);outcomes_[sid]={Phase::Idle,0,0,L"Microsoft-account password verified and encrypted for face unlock."};
+      grants_.revoke(sid);outcomes_[sid]={Phase::Idle,0,0,L"Windows account password verified and encrypted for face unlock."};
       break;
     case Operation::DeleteWindowsCredential:
       if(demo_) {r.error=ERROR_NOT_SUPPORTED;break;}

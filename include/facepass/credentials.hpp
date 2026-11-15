@@ -18,10 +18,11 @@ struct VerifiedCredential {
 };
 bool valid_windows_credential(const WindowsCredential&);
 std::wstring microsoft_account_username(const std::wstring& username,const std::wstring& domain={});
+std::wstring windows_account_username(const std::wstring& username,const std::wstring& domain={});
 Handle verify_windows_credential(const WindowsCredential&);
 VerifiedCredential prompt_windows_credential(HWND parent, bool saveForUnlock);
 bool password_unlock_enabled();
 bool negotiate_package_id(ULONG& id);
-// Called in LogonUI, so protected online credentials belong to its logon session.
-std::vector<BYTE> pack_windows_credential(const WindowsCredential&);
+// Called in LogonUI, so protected credentials belong to its logon session.
+std::vector<BYTE> pack_windows_credential(const WindowsCredential&,bool unlockWorkstation=false);
 }

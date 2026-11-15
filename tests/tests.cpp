@@ -9,6 +9,7 @@
 #include <limits>
 #include <atomic>
 #include <wincred.h>
+#include <ntsecapi.h>
 #define SECURITY_WIN32
 #include <security.h>
 using namespace facepass;
@@ -129,6 +130,43 @@ void core_tests() {
   check(CredUnPackAuthenticationBufferW(CRED_PACK_PROTECTED_CREDENTIALS,packed.data(),static_cast<DWORD>(packed.size()),unpackedUser,&us,unpackedDomain,&ds,unpackedPassword,&ps)!=FALSE,"Windows unpacks the protected online identity credential");
   // EX2 unpacking returns a marshaled credential string rather than a plain password.
   SecureZeroMemory(unpackedPassword,sizeof(unpackedPassword));SecureZeroMemory(packed.data(),packed.size());
+  auto localName=windows_account_username(L".\\facepass-local-test");
+  check(windows_account_username(L"facepass-local-test")==localName,"bare local username is qualified with this computer");
+  check(windows_account_username(L"facepass-local-test",L".")==localName,"split local CredUI domain is normalized");
+  check(windows_account_username(localName)==localName,"canonical computer-qualified name is stable");
+  check(windows_account_username(L"facepass-test@example.test")==saved.username,"bare email keeps Microsoft-account compatibility");
+  rejects([]{windows_account_username(L"OTHER-COMPUTER\\user");},"remote computer and AD identities are rejected");
+  rejects([]{windows_account_username(L"AzureAD\\user");},"Entra identity rejected for password-backed setup");
+  rejects([]{windows_account_username(L".\\");},"empty local account rejected");
+  rejects([]{windows_account_username(L".\\one\\two");},"nested local identity rejected");
+  rejects([]{windows_account_username(L".\\user",L"MicrosoftAccount");},"conflicting CredUI authorities rejected");
+  rejects([]{windows_account_username(std::wstring(L".\\user\0suffix",14));},"embedded NUL identity rejected");
+  auto local=saved;wcscpy_s(local.username,localName.c_str());
+  check(valid_windows_credential(local),"canonical local credential accepted");
+  auto invalidLocal=local;wcscpy_s(invalidLocal.username,L".\\facepass-local-test");
+  check(!valid_windows_credential(invalidLocal),"noncanonical persisted local identity rejected");
+  invalidLocal=local;invalidLocal.password[0]=0;check(!valid_windows_credential(invalidLocal),"blank local password rejected");
+  store.credential(sid,local);auto restoredLocal=store.credential(sid);
+  check(wcscmp(restoredLocal.username,local.username)==0&&wcscmp(restoredLocal.password,local.password)==0,"local credential encrypted storage round-trip");
+  for(bool unlock:{false,true}) {
+    auto localPacked=pack_windows_credential(local,unlock);
+    auto logon=reinterpret_cast<const KERB_INTERACTIVE_UNLOCK_LOGON*>(localPacked.data());
+    check(logon->Logon.MessageType==(unlock?KerbWorkstationUnlockLogon:KerbInteractiveLogon),"local serialization preserves Windows usage scenario");
+    auto field=[&](const UNICODE_STRING& value) {
+      auto offset=reinterpret_cast<size_t>(value.Buffer);
+      check(offset>=sizeof(*logon)&&offset+value.Length<=localPacked.size()&&value.Length%sizeof(wchar_t)==0,"packed local string offsets are in bounds");
+      return std::wstring(reinterpret_cast<const wchar_t*>(localPacked.data()+offset),value.Length/sizeof(wchar_t));
+    };
+    auto packedDomain=field(logon->Logon.LogonDomainName),packedUser=field(logon->Logon.UserName),protectedLocal=field(logon->Logon.Password);
+    check(packedDomain+L"\\"+packedUser==local.username,"local serialization retains exact computer and username");
+    auto first=reinterpret_cast<const BYTE*>(local.password);auto count=wcslen(local.password)*sizeof(wchar_t);
+    check(std::search(localPacked.begin(),localPacked.end(),first,first+count)==localPacked.end(),"local serialization contains no plaintext password");
+    CRED_PROTECTION_TYPE protection=CredUnprotected;
+    check(CredIsProtectedW(protectedLocal.data(),&protection)&&protection!=CredUnprotected,"Windows recognizes protected local password");
+    wchar_t recovered[513]{};DWORD recoveredSize=513;
+    check(CredUnprotectW(FALSE,protectedLocal.data(),static_cast<DWORD>(protectedLocal.size()+1),recovered,&recoveredSize)&&wcscmp(recovered,local.password)==0,"Windows recovers exact local password in originating logon session");
+    SecureZeroMemory(recovered,sizeof(recovered));SecureZeroMemory(protectedLocal.data(),protectedLocal.size()*sizeof(wchar_t));SecureZeroMemory(localPacked.data(),localPacked.size());
+  }
   t.samples.assign(SampleCount,basis(0));store.save(sid,t);check(store.enrolled(sid),"template persisted");check(match(basis(0),store.load(sid))>0.99,"encrypted template round-trip");
   check(!store.enrolled(L"S-1-5-21-1-2-3-1234"),"separate SID has no template");rejects([&]{store.load(L"..\\escape");},"path traversal rejected");
   auto faceFile=root/(sid+L".face");{std::fstream stream(faceFile,std::ios::binary|std::ios::in|std::ios::out);stream.seekg(-8,std::ios::end);char value=0;stream.read(&value,1);value^=0x55;stream.seekp(-8,std::ios::end);stream.write(&value,1);}

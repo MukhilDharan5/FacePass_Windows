@@ -1,6 +1,6 @@
 # Installation
 
-For direct Microsoft-account laptop testing, build 0.3.0 and run scripts/install-password-unlock.ps1 elevated. It installs the service and enables the password-backed Credential Provider with the user's explicit unvalidated-host choice. Follow [password-backed unlock](password-backed-unlock.md) for password setup, enrollment, native sign-in proof and the real lock-screen test. Special Microsoft LSA signing is not required for this route because FacePassAuth is not loaded.
+For direct local or Microsoft-account laptop testing, build 0.3.0 and run scripts/install-password-unlock.ps1 elevated. Local accounts use their existing local password and do not need a Microsoft account. It installs the service and enables the password-backed Credential Provider with the user's explicit unvalidated-host choice. Follow [password-backed unlock](password-backed-unlock.md) for password setup, enrollment, native sign-in proof and the real lock-screen test. Special Microsoft LSA signing is not required for this route because FacePassAuth is not loaded.
 
 Build with scripts/build.ps1 -Package. From elevated x64 PowerShell in the 0.2.0 package run installer/install.ps1. It installs LocalService, owned Program Files binaries and protected ProgramData storage; authentication stays inactive. Launch settings as the normal user and enroll separately from demo data.
 

@@ -2,7 +2,7 @@
 
 FacePass is an experimental Windows x64 face-unlock app built with C++20 and OpenCV. It recognizes faces offline with YuNet and SFace, stores encrypted face templates, and provides a native Settings app, Windows service, supervised camera worker, and Credential Provider.
 
-The Microsoft-account unlock route stores an **encrypted Windows account password** and submits it through Windows' built-in Negotiate authentication after an approved face match. Windows performs final authentication. No PIN is stored, and this route does not install a custom LSA authentication package.
+The password-backed unlock route supports **local Windows accounts without a Microsoft account**, as well as Microsoft accounts. It stores an **encrypted Windows account password** and submits it through Windows' built-in Negotiate authentication after an approved face match. Windows performs final authentication. No PIN is stored, and this route does not install a custom LSA authentication package.
 
 **Status:** the Release build, all six automated test suites, and demo IPC/restart checks pass. Actual Windows lock-screen unlock has not been verified. FacePass is not Windows Hello or production authentication software. See the [verification ledger](docs/test-results.md).
 
@@ -16,7 +16,7 @@ The Microsoft-account unlock route stores an **encrypted Windows account passwor
 - Live camera preview, enrollment, diagnostic recognition, and cancellation.
 - A supervised capture process with cancellation and a hard deadline.
 - Authenticated local IPC and session-bound, ten-second, one-use unlock approvals.
-- Optional encrypted Microsoft-account password storage and Windows credential submission.
+- Optional encrypted local or Microsoft-account password storage and Windows credential submission.
 - Native Windows PIN/password sign-in remains available.
 
 ## Recognition profiles
@@ -84,9 +84,9 @@ With the demo running, equivalent CLI commands are:
 
 Use `--enroll` for transient password verification. Watched enrollment/recognition jobs return `0` on success, `2` on failure, and `3` on cancellation. `--help` lists the service and standalone commands.
 
-## Install Microsoft-account face unlock
+## Install local or Microsoft-account face unlock
 
-Read the [password-backed unlock guide](docs/password-backed-unlock.md) and [recovery guide](docs/recovery.md) before installation. This experimental route supports an existing **Microsoft-account console session after native sign-in**. Boot sign-in, AD/Entra accounts, and RDP are unsupported.
+Read the [password-backed unlock guide](docs/password-backed-unlock.md) and [recovery guide](docs/recovery.md) before installation. This experimental route supports an existing **local or Microsoft-account console session after native sign-in**. A local account must have a nonempty password; no Microsoft account or account conversion is required. Boot sign-in, AD/Entra accounts, and RDP are unsupported.
 
 After building the package, run this from an elevated x64 PowerShell in the project directory:
 
@@ -98,7 +98,7 @@ This installs the Windows service and registers the FacePass Credential Provider
 
 1. Open Settings as your normal user. Press **Win + R**, enter `"C:\Program Files\FacePass\FaceUnlockSettings.exe"`, and press Enter.
 2. Save **Manual** or **Automatic** activation and the camera preferences.
-3. In **Authentication**, choose **Save Windows password**. Enter the Microsoft-account email and account password, not a PIN. `MicrosoftAccount\your-email` also works. The service verifies the credentials against the signed-in user's SID before saving them encrypted.
+3. In **Authentication**, choose **Save Windows password**. For a local account enter `.\username` or `COMPUTER\username` and the local account password, not a PIN. A bare local username also works. Microsoft accounts can use an email or `MicrosoftAccount\your-email`. The service verifies the credentials against the signed-in user's SID before saving them encrypted.
 4. Enroll your face in the installed service. Demo enrollment is separate.
 5. To skip unlock challenges, choose **Face and camera → Recognition profile → Instant** and click **Save preferences**.
 6. Use native Windows PIN/password once after service startup or an update. Lock again, select the FacePass tile, and try recognition. Instant accepts the first qualifying match; other profiles require the Strict head-turn challenge.
@@ -110,7 +110,7 @@ The CLI can save a profile without changing activation:
 & 'C:\Program Files\FacePass\FacePassRecognition.exe' --profile balanced
 ```
 
-After a Microsoft-account password change, save the new password in Settings. **Remove saved password** erases the stored credential; **Delete profile** erases both the face template and credential. A passwordless Microsoft account cannot use this password-backed route.
+After a Windows account password change, save the new password in Settings. **Remove saved password** erases the stored credential; **Delete profile** erases both the face template and credential. Accounts without a password cannot use this password-backed route.
 
 ## Disable or uninstall
 

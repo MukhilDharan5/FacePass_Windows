@@ -62,8 +62,8 @@ if ($taskAccountSource -eq 'Unknown' -or [string]::IsNullOrWhiteSpace($taskAccou
     $taskBlockers.Add('Cannot confirm that the current account is a supported local account.')
 } elseif ($Backend -eq 'CustomPasswordless' -and $taskAccountSource -ne 'Local') {
     $taskBlockers.Add('The custom LSA route has no validated Microsoft-account support.')
-} elseif ($Backend -eq 'PasswordBacked' -and $taskAccountSource -ne 'MicrosoftAccount') {
-    $taskBlockers.Add('The password-backed route currently targets a Microsoft-connected account.')
+} elseif ($Backend -eq 'PasswordBacked' -and $taskAccountSource -notin @('Local','MicrosoftAccount')) {
+    $taskBlockers.Add('The password-backed route requires a local or Microsoft-connected account.')
 }
 $taskService = Get-Service -Name FacePassService -ErrorAction SilentlyContinue
 $taskProviderKey = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Authentication\Credential Providers\{A528A337-5D76-4B10-89F8-7B476F2BA491}'

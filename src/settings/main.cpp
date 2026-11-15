@@ -74,7 +74,7 @@ struct App {
       button(response.credentialSaved?L"Update saved password":L"Save Windows password",SavePassword,246,490,230);
       button(L"Remove saved password",RemovePassword,490,490,230);
       button(L"Save preferences",Apply,246,536,180);
-      label(L"Face unlock submits the saved Microsoft-account password to Windows.\nUse your account password, not your PIN. Remove it here at any time.",246,584,640,46);
+      label(L"Face unlock submits your saved local or Microsoft-account password to Windows.\nFor a local account use .\\username and your password, not your PIN.",246,584,640,46);
     } else if(page==2) {
       label(L"Camera",246,124,170);
       auto names=camera_names();if(names.empty())names={L"Camera 0 (no camera enumerated)"};
@@ -91,7 +91,7 @@ struct App {
       label(L"Use recent sign-in to enroll within two minutes of native Windows sign-in,\nor Enroll face for transient password verification. Follow the live preview.\nSeven encrypted samples are saved; camera images remain in memory.",246,517,660,78);
     } else {
       label(L"Service and security diagnostics",246,124);
-      label(L"Face unlock: saved encrypted Microsoft-account password; Windows authenticates.\nIPC: verified Windows service; OS client identity; one-use face approval.\nStorage: encrypted templates and optional encrypted account password.\nCapture: supervised worker; cancellation and hard capture deadline.\nRecognition: Instant skips liveness; other unlock profiles use Strict challenges.\nConsole unlock only; boot logon and RDP are unsupported.",246,174,640,186);
+      label(L"Face unlock: encrypted local or Microsoft-account password; Windows authenticates.\nIPC: verified Windows service; OS client identity; one-use face approval.\nStorage: encrypted templates and optional encrypted account password.\nCapture: supervised worker; cancellation and hard capture deadline.\nRecognition: Instant skips liveness; other unlock profiles use Strict challenges.\nConsole unlock only; boot logon and RDP are unsupported.",246,174,640,186);
       label(L"Recovery: select Windows PIN/password. Remove only the FacePass\nprovider registration if the demo tile causes trouble. See recovery.md.",246,388,640,75);
       button(L"Open recovery guide",Recovery,246,505,205);button(L"Windows event logs",Logs,470,505,205);
       button(L"Refresh status",Refresh,246,557,205);
