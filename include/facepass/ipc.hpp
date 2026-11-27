@@ -21,6 +21,7 @@ struct Request {
   Operation operation = Operation::Status;
   wchar_t targetSid[192]{}; // Only SYSTEM may name another user, and only for status/scanning.
   Config config{};
+  std::uint64_t lockEpoch = 0; // Provider cancellation targets one lock/resume episode.
   UnlockTicket ticket{}; // Only LSASS may consume a recognition authorization.
   WindowsCredential windowsCredential{}; // Own-account verified setup only.
 };
@@ -37,6 +38,9 @@ struct Response {
   std::uint32_t backendAvailable = 0;
   std::uint32_t passwordBackedBackend = 0;
   std::uint32_t credentialSaved = 0;
+  std::uint32_t unlockEligible = 0; // Matching, previously authenticated locked console only.
+  std::uint32_t automaticAttempted = 0; // One automatic attempt per lock/resume, including cancellation.
+  std::uint64_t lockEpoch = 0;
   float similarity = 0;
   wchar_t message[512]{};
   UnlockTicket ticket{}; // Sent only to the OS LogonUI process, never ordinary clients.
@@ -54,7 +58,7 @@ struct Caller {
 bool valid_request(const Hello&, const Request&, std::uint64_t now);
 bool authorize(const Caller&, Operation, const std::wstring& target);
 using RequestHandler = std::function<Response(const Caller&,const Request&)>;
-Response call(const Request&, bool demo = false, HANDLE enrollmentToken = nullptr);
+Response call(const Request&, bool demo = false, HANDLE enrollmentToken = nullptr, std::stop_token stop = {});
 class PipeServer {
   bool demo_;
   RequestHandler handler_;

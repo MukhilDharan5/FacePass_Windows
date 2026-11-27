@@ -18,6 +18,12 @@ std::vector<std::uint8_t> crypt(std::span<const std::uint8_t> data, bool encrypt
   SecureZeroMemory(out.pbData,out.cbData); LocalFree(out.pbData); return result;
 }
 struct Wipe { std::vector<std::uint8_t>& data; ~Wipe(){SecureZeroMemory(data.data(),data.size());} };
+struct LegacyConfig {
+  std::uint32_t version,mode,profile,camera,attempts,cooldownSeconds,timeoutSeconds;
+  float threshold;
+  std::uint32_t requireAfterRestart;
+};
+static_assert(sizeof(LegacyConfig)==36);
 }
 Store::Store(std::filesystem::path root, bool service):root_(std::move(root)) { protect_directory(root_,service); }
 std::filesystem::path Store::path(const std::wstring& sid,const wchar_t* suffix) const {
@@ -55,6 +61,16 @@ Config Store::config(const std::wstring& sid) {
   std::lock_guard lock(mutex_); auto f=path(sid,L".config");
   if(GetFileAttributesW(f.c_str())==INVALID_FILE_ATTRIBUTES) { if(GetLastError()==ERROR_FILE_NOT_FOUND) return {}; fail("Read configuration"); }
   auto bytes=read(f); Wipe wipe{bytes}; Config c{};
+  if(bytes.size()==sizeof(LegacyConfig)) {
+    LegacyConfig legacy{};std::memcpy(&legacy,bytes.data(),sizeof(legacy));
+    if(legacy.version!=1)throw std::runtime_error("Invalid saved configuration");
+    c.mode=static_cast<Mode>(legacy.mode);c.profile=static_cast<Profile>(legacy.profile);c.camera=legacy.camera;
+    c.attempts=legacy.attempts;c.cooldownSeconds=legacy.cooldownSeconds;c.timeoutSeconds=legacy.timeoutSeconds;
+    c.threshold=legacy.threshold;c.requireAfterRestart=legacy.requireAfterRestart;c.cameraSource=CameraSource::Both;
+    if(!valid_config(c))throw std::runtime_error("Invalid saved configuration");
+    write(f,{reinterpret_cast<const std::uint8_t*>(&c),sizeof(c)});
+    return c;
+  }
   if(bytes.size()!=sizeof(c)) throw std::runtime_error("Corrupt configuration");
   std::memcpy(&c,bytes.data(),sizeof(c)); if(!valid_config(c)) throw std::runtime_error("Invalid saved configuration"); return c;
 }

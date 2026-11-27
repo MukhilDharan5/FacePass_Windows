@@ -8,12 +8,71 @@
 #include <vector>
 #include <new>
 #include <cstring>
+#include <optional>
+#ifdef FACEPASS_AUTOMATIC_TESTING
+#include "../../tests/automatic-runtime.hpp"
+#endif
 using namespace facepass;
 namespace {
 const CLSID ProviderClsid={0xa528a337,0x5d76,0x4b10,{0x89,0xf8,0x7b,0x47,0x6f,0x2b,0xa4,0x91}};
 HINSTANCE module=nullptr;
 std::atomic<long> objects=0;
 constexpr DWORD FieldCount=5;
+bool trusted_provider() {
+#ifdef FACEPASS_AUTOMATIC_TESTING
+  return testing::trusted_provider();
+#else
+  return is_system_sid(current_sid());
+#endif
+}
+bool password_backend_enabled() {
+#ifdef FACEPASS_AUTOMATIC_TESTING
+  return testing::password_backend_enabled();
+#else
+  return password_unlock_enabled();
+#endif
+}
+std::uint64_t provider_now() {
+#ifdef FACEPASS_AUTOMATIC_TESTING
+  return testing::provider_now();
+#else
+  return unix_millis();
+#endif
+}
+std::optional<DWORD> last_input_tick() {
+#ifdef FACEPASS_AUTOMATIC_TESTING
+  return testing::last_input_tick();
+#else
+  LASTINPUTINFO input{sizeof(input)};
+  if(!GetLastInputInfo(&input))return {};
+  return input.dwTime;
+#endif
+}
+DWORD input_now() {
+#ifdef FACEPASS_AUTOMATIC_TESTING
+  return testing::input_now();
+#else
+  return GetTickCount();
+#endif
+}
+bool on_logon_input_desktop() {
+#ifdef FACEPASS_AUTOMATIC_TESTING
+  return testing::on_logon_input_desktop();
+#else
+  auto desktop=GetThreadDesktop(GetCurrentThreadId());
+  wchar_t name[256]{};BOOL input=FALSE;
+  return desktop && GetUserObjectInformationW(desktop,UOI_NAME,name,sizeof(name),nullptr)
+    && _wcsicmp(name,L"Winlogon")==0
+    && GetUserObjectInformationW(desktop,UOI_IO,&input,sizeof(input),nullptr) && input;
+#endif
+}
+Response provider_call(const Request& request,std::stop_token stop={}) {
+#ifdef FACEPASS_AUTOMATIC_TESTING
+  return testing::provider_request(request,stop);
+#else
+  return call(request,false,nullptr,stop);
+#endif
+}
 void trace(const std::wstring& message) { event_log(L"Credential Provider: "+message); }
 std::wstring status_code(NTSTATUS status) { wchar_t text[16]{};swprintf_s(text,L"0x%08lX",static_cast<ULONG>(status));return text; }
 struct Notifications {
@@ -22,10 +81,11 @@ struct Notifications {
   ~Notifications(){if(events)events->Release();}
 };
 class Credential final : public ICredentialProviderCredential2 {
+  friend class Provider;
   std::atomic<ULONG> refs_{1};
   std::wstring sid_;
   bool unlockWorkstation_=false;
-  std::wstring text_=L"Recognition demonstration only. Use Windows PIN/password to sign in.";
+  std::wstring text_=L"Use Windows PIN/password, or select FacePass to scan.";
   ICredentialProviderCredentialEvents* events_=nullptr;
   ICredentialProviderCredentialEvents2* events2_=nullptr;
   HWND window_=nullptr;
@@ -34,55 +94,126 @@ class Credential final : public ICredentialProviderCredential2 {
   std::wstring pending_;
   UnlockTicket ticket_{},pendingTicket_{};
   std::array<std::uint8_t,32> serializedNonce_{};
+  std::array<std::uint8_t,32> notifiedNonce_{};
+  std::array<std::uint8_t,32> interactionNonce_{};
+  DWORD inputBaseline_=0,inputArmedAt_=0;
+  bool inputArmed_=false,inputConfirmed_=false;
+  std::atomic<bool> workerActive_{false};
+  std::uint64_t generation_=0,pendingGeneration_=0;
   bool automatic_=false,pendingAutomatic_=false;
+  bool pendingManualStart_=false;
   std::weak_ptr<Notifications> notifications_;
   bool selected_=false;
+  bool has_approval() const { return (selected_ || automatic_) && ticket_.nonce!=serializedNonce_ && valid_ticket(ticket_,provider_now()) && sid_==ticket_.sid; }
+  void refresh_interaction() {
+    if(!has_approval()) {interactionNonce_={};inputArmed_=inputConfirmed_=false;return;}
+    if(interactionNonce_!=ticket_.nonce) {interactionNonce_=ticket_.nonce;inputArmed_=inputConfirmed_=false;trace(L"face verified; awaiting lock-screen interaction");}
+    const auto input=last_input_tick();
+    if(!input) {inputArmed_=inputConfirmed_=false;return;}
+    const auto now=input_now();
+    if(!inputArmed_ || !on_logon_input_desktop()) {
+      inputBaseline_=*input;inputArmedAt_=now;inputArmed_=true;inputConfirmed_=false;return;
+    }
+    // DWORD subtraction handles uptime wrap. Reject stale/future timestamps:
+    // GetLastInputInfo is session-specific and its tick is not always monotonic.
+    const DWORD sinceArm=*input-inputArmedAt_,elapsed=now-inputArmedAt_;
+    if(!inputConfirmed_ && *input!=inputBaseline_ && sinceArm>0 && sinceArm<=elapsed) {
+      inputConfirmed_=true;trace(L"lock-screen interaction confirmed after face verification");
+    }
+  }
   static LRESULT CALLBACK wndproc(HWND window,UINT message,WPARAM w,LPARAM l) {
     auto self=reinterpret_cast<Credential*>(GetWindowLongPtrW(window,GWLP_USERDATA));
     if(message==WM_NCCREATE) { self=static_cast<Credential*>(reinterpret_cast<CREATESTRUCTW*>(l)->lpCreateParams); SetWindowLongPtrW(window,GWLP_USERDATA,reinterpret_cast<LONG_PTR>(self)); }
     if(message==WM_APP+1&&self) {
-      { std::lock_guard lock(self->mutex_); self->text_=self->pending_; self->ticket_=self->pendingTicket_; self->automatic_=self->pendingAutomatic_; }
-      if(valid_ticket(self->ticket_,unix_millis())) trace(L"face approval received; selected="+std::to_wstring(self->selected_)+L"; automatic="+std::to_wstring(self->automatic_));
+      bool startManual=false;
+      { std::lock_guard lock(self->mutex_);
+        if(self->pendingGeneration_!=self->generation_) return 0;
+        self->text_=self->pending_; self->ticket_=self->pendingTicket_; self->automatic_=self->pendingAutomatic_;
+        startManual=self->pendingManualStart_ && self->selected_;
+      }
+      if(startManual) {try{self->scan(false);}catch(...){self->post(L"Cannot start face scan. Use Windows PIN/password.",self->generation_);}return 0;}
+      self->refresh_interaction();
+      if(self->has_approval())self->text_=self->ready()?L"Face verified. Continuing to Windows...":L"Face verified. Press Space or Enter, or interact with the lock screen to continue.";
       if(self->events_&&self->selected_) {
         if(self->events2_) self->events2_->BeginFieldUpdates();
         self->events_->SetFieldString(self,2,self->text_.c_str());
         if(self->events2_) self->events2_->EndFieldUpdates();
       }
-      if(self->ready()) if(auto notify=self->notifications_.lock();notify && notify->events) {auto hr=notify->events->CredentialsChanged(notify->context);trace(L"automatic submission requested; result="+status_code(hr));}
+      if(self->ready() && self->ticket_.nonce!=self->notifiedNonce_)
+        if(auto notify=self->notifications_.lock();notify && notify->events) {
+          self->notifiedNonce_=self->ticket_.nonce;
+          trace(L"face approval received; selected="+std::to_wstring(self->selected_)+L"; automatic="+std::to_wstring(self->automatic_));
+          // Both a live approval and later lock-screen input are required
+          // before Windows is asked to submit this credential.
+          auto hr=notify->events->CredentialsChanged(notify->context);
+          trace(L"interaction-confirmed sign-in requested; result="+status_code(hr));
+        }
       return 0;
     }
     return DefWindowProcW(window,message,w,l);
   }
-  void post(const std::wstring& text) { {std::lock_guard lock(mutex_);pending_=text;pendingTicket_={};pendingAutomatic_=false;} if(window_) PostMessageW(window_,WM_APP+1,0,0); }
-  void post(const Response& response) { {std::lock_guard lock(mutex_);pending_=response.message;pendingTicket_=response.ticket;pendingAutomatic_=response.config.mode==Mode::Automatic;} if(window_)PostMessageW(window_,WM_APP+1,0,0); }
+  void post(const std::wstring& text,std::uint64_t generation) { {std::lock_guard lock(mutex_);pendingGeneration_=generation;pending_=text;pendingTicket_={};pendingAutomatic_=false;pendingManualStart_=false;} if(window_) PostMessageW(window_,WM_APP+1,0,0); }
+  void post(const Response& response,std::uint64_t generation,bool startManual=false) {
+    {std::lock_guard lock(mutex_);pendingGeneration_=generation;pending_=response.message;
+      if(response.phase==Phase::Recognized && response.unlockEligible && !valid_ticket(response.ticket,provider_now()))pending_=L"Face confirmation expired. Select Scan again or use Windows PIN/password.";
+      pendingTicket_=response.ticket;pendingAutomatic_=response.config.mode==Mode::Automatic;pendingManualStart_=startManual;}
+    if(window_)PostMessageW(window_,WM_APP+1,0,0);
+  }
   void scan(bool explicitRequest,bool automaticOnly=false) {
+    // Selection and repeated Advise must not interrupt a background scan or
+    // revoke an approval during Windows' credential re-enumeration.
+    if(workerActive_ && !explicitRequest) return;
     if(worker_.joinable()) { worker_.request_stop(); worker_.join(); }
     auto sid=sid_;
-    ticket_={};
-    worker_=std::jthread([this,sid,explicitRequest,automaticOnly](std::stop_token stop) {
+    ticket_={}; automatic_=false; workerActive_=true;
+    const auto generation=++generation_;
+    try { worker_=std::jthread([this,sid,explicitRequest,automaticOnly,generation](std::stop_token stop) {
+      struct Done {std::atomic<bool>& active;~Done(){active=false;}} done{workerActive_};
       Request r; wcsncpy_s(r.targetSid,sid.c_str(),_TRUNCATE);
+      bool trusted=false,cancel=false;
+      std::uint64_t lockEpoch=0;
       try {
         // Loading this DLL in a settings/test process must never start a sign-in scan.
-        if(!is_system_sid(current_sid())) return;
-        auto response=call(r);
-        if(stop.stop_requested()) return;
-        if(automaticOnly && (response.config.mode!=Mode::Automatic || !response.backendAvailable)) return;
-        // Re-enumeration may attach another callback while an approval is live.
-        // Reuse that approval rather than starting a scan that revokes it.
-        if(valid_ticket(response.ticket,unix_millis())) {post(response);return;}
-        if(response.config.mode!=Mode::Off && (explicitRequest||response.config.mode==Mode::Manual||!response.cameraActive)) {
-          r.operation=Operation::Recognize; response=call(r);
+        if(!trusted_provider()) return;
+        trusted=true;
+        auto response=provider_call(r,stop);
+        lockEpoch=response.lockEpoch;
+        if(automaticOnly && (response.config.mode!=Mode::Automatic || !response.backendAvailable)) {
+          // Selection may arrive while the initial mode query is in flight.
+          // Finish the probe and let the UI honor that pending manual selection.
+          workerActive_=false;post(response,generation,response.config.mode!=Mode::Off);return;
         }
-        if(stop.stop_requested()){r.operation=Operation::Cancel;try{call(r);}catch(...){}return;}
-        post(response);
-        while(response.cameraActive&&!stop.stop_requested()) {
-          for(int i=0;i<5&&!stop.stop_requested();++i) std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        const auto deadline=std::chrono::steady_clock::now()+std::chrono::seconds(response.config.timeoutSeconds+5+UnlockLifetimeSeconds);
+        bool requested=false;
+        while(!stop.stop_requested()) {
+          if(response.lockEpoch) lockEpoch=response.lockEpoch;
+          if(response.config.mode==Mode::Off || (automaticOnly && response.config.mode!=Mode::Automatic)) {post(response,generation);break;}
+          const bool approved=valid_ticket(response.ticket,provider_now());
+          const bool manualRequest=!automaticOnly && (explicitRequest || response.config.mode==Mode::Manual || !response.backendAvailable);
+          if(manualRequest && !requested && !approved && !response.cameraActive) {
+            r.operation=Operation::Recognize; response=provider_call(r,stop); requested=true;
+          }
           if(stop.stop_requested()) break;
-          r.operation=Operation::Status; response=call(r); post(response);
+          post(response,generation);
+          const bool watchAutomatic=response.config.mode==Mode::Automatic && response.backendAvailable;
+          if(!response.cameraActive && !valid_ticket(response.ticket,provider_now())
+              && !watchAutomatic && (requested || (response.unlockEligible && response.automaticAttempted))) break;
+          if(!watchAutomatic && std::chrono::steady_clock::now()>=deadline) {cancel=true;post(L"Face scan timed out. Use Windows PIN/password or Scan again.",generation);break;}
+          // Automatic mode only observes status. The service starts one scan per
+          // lock/resume; an early poll waits for WTS without restarting capture.
+          // Stay subscribed after failure/expiry: sleep/resume can reuse the
+          // same advised provider without another Advise or SetSelected call.
+          const int intervals=response.cameraActive || valid_ticket(response.ticket,provider_now())?1:4;
+          for(int i=0;i<intervals&&!stop.stop_requested();++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+          if(stop.stop_requested()) break;
+          r.operation=Operation::Status; response=provider_call(r,stop);
         }
-        if(stop.stop_requested()) { r.operation=Operation::Cancel; try{call(r);}catch(...){} }
-      } catch(const std::exception& ex) { post(L"FacePass unavailable: "+widen(ex.what())+L". Use Windows PIN/password."); }
-    });
+      } catch(const std::exception& ex) {
+        cancel=true;
+        if(!stop.stop_requested()) post(L"FacePass unavailable: "+widen(ex.what())+L". Use Windows PIN/password.",generation);
+      }
+      if(trusted && (stop.stop_requested() || cancel)) {r.operation=Operation::Cancel;r.lockEpoch=lockEpoch;try{provider_call(r);}catch(...){}}
+    }); } catch(...) {workerActive_=false;throw;}
   }
 public:
   explicit Credential(std::wstring sid,std::weak_ptr<Notifications> notifications,bool unlockWorkstation):sid_(std::move(sid)),unlockWorkstation_(unlockWorkstation),notifications_(std::move(notifications)) {
@@ -91,11 +222,15 @@ public:
     RegisterClassW(&wc);
     window_=CreateWindowExW(0,wc.lpszClassName,L"",0,0,0,0,0,HWND_MESSAGE,nullptr,module,this);
   }
-  bool ready() const { return (selected_ || automatic_) && ticket_.nonce!=serializedNonce_ && valid_ticket(ticket_,unix_millis()); }
+  bool ready() const { return has_approval() && inputConfirmed_ && on_logon_input_desktop(); }
   const std::wstring& sid() const {return sid_;}
-  void start_automatic(){if(ready())return;try{scan(false,true);}catch(...){post(L"Automatic face unlock unavailable. Use Windows PIN/password.");}}
+  void start_automatic(){if(has_approval())return;try{scan(false,true);}catch(...){post(L"Automatic face unlock unavailable. Use Windows PIN/password.",generation_);}}
+  void stop_scan(bool wait=false) {
+    ++generation_; ticket_={}; automatic_=false; interactionNonce_={};inputArmed_=inputConfirmed_=false;worker_.request_stop();
+    if(wait && worker_.joinable()) worker_.join();
+  }
   ~Credential() {
-    worker_.request_stop(); if(worker_.joinable()) worker_.join();
+    stop_scan(true);
     if(events2_) events2_->Release(); if(events_) events_->Release();
     if(window_) DestroyWindow(window_); UnregisterClassW(L"FacePassProviderStatus",module); --objects;
   }
@@ -115,17 +250,30 @@ public:
     if(events2_) {events2_->Release();events2_=nullptr;} if(events_){events_->Release();events_=nullptr;} return S_OK;
   }
   HRESULT STDMETHODCALLTYPE SetSelected(BOOL* autoLogon) override {
-    if(!autoLogon) return E_POINTER; selected_=true; *autoLogon=ready();trace(L"tile selected; approval ready="+std::to_wstring(*autoLogon)); if(*autoLogon)return S_OK;
-    try{scan(false);}catch(...){post(L"Cannot start face scan. Use Windows PIN/password.");} return S_OK;
+    if(!autoLogon) return E_POINTER; selected_=true;refresh_interaction();*autoLogon=ready();trace(L"tile selected; interaction-confirmed approval ready="+std::to_wstring(*autoLogon)); if(has_approval())return S_OK;
+    try{scan(false);}catch(...){post(L"Cannot start face scan. Use Windows PIN/password.",generation_);} return S_OK;
   }
-  HRESULT STDMETHODCALLTYPE SetDeselected() override {trace(L"tile deselected; approval ready="+std::to_wstring(ready())); selected_=false;ticket_={};automatic_=false;worker_.request_stop();{std::lock_guard lock(mutex_);pendingTicket_={};pendingAutomatic_=false;}return S_OK; }
+  HRESULT STDMETHODCALLTYPE SetDeselected() override {
+    trace(L"tile deselected; approval ready="+std::to_wstring(ready()));
+    // Windows may deselect an unselected tile while keeping PIN/password active.
+    // That must not cancel an independent automatic scan. Leaving a selected
+    // FacePass tile is explicit cancellation and must discard late approvals.
+    const bool wasSelected=selected_;selected_=false;
+    if(wasSelected) {
+      stop_scan(true);
+      // Cancellation ends this attempt. Keep observing future lock/resume
+      // episodes if Windows retains the provider while PIN/password is active.
+      start_automatic();
+    }
+    return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE GetFieldState(DWORD id,CREDENTIAL_PROVIDER_FIELD_STATE* state,CREDENTIAL_PROVIDER_FIELD_INTERACTIVE_STATE* interactive) override {
     if(!state||!interactive) return E_POINTER; if(id>=FieldCount) return E_INVALIDARG;
     *state=id==0||id==1 ? CPFS_DISPLAY_IN_BOTH : CPFS_DISPLAY_IN_SELECTED_TILE; *interactive=CPFIS_NONE; return S_OK;
   }
   HRESULT STDMETHODCALLTYPE GetStringValue(DWORD id,wchar_t** value) override {
     if(!value) return E_POINTER; *value=nullptr;
-    if(id==1) return SHStrDupW(password_unlock_enabled()?L"FacePass face unlock":passwordless_enabled()?L"FacePass passwordless unlock":L"FacePass (recognition demo)",value);
+    if(id==1) return SHStrDupW(password_backend_enabled()?L"FacePass face unlock":passwordless_enabled()?L"FacePass passwordless unlock":L"FacePass (recognition demo)",value);
     if(id==2) return SHStrDupW(text_.c_str(),value);
     if(id==3) return SHStrDupW(L"Scan again",value);
     if(id==4) return SHStrDupW(L"Unlock",value); return E_INVALIDARG;
@@ -150,13 +298,14 @@ public:
   HRESULT STDMETHODCALLTYPE GetSerialization(CREDENTIAL_PROVIDER_GET_SERIALIZATION_RESPONSE* response,CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION* serialization,wchar_t** text,CREDENTIAL_PROVIDER_STATUS_ICON* icon) override {
     if(!response||!serialization||!text||!icon) return E_POINTER;
     *response=CPGSR_NO_CREDENTIAL_NOT_FINISHED; *serialization={}; *text=nullptr; *icon=CPSI_WARNING;
+    refresh_interaction();
     trace(L"serialization requested; approval ready="+std::to_wstring(ready()));
     ULONG package=0;
-    if(ready() && password_unlock_enabled()) {
+    if(ready() && password_backend_enabled()) {
       try {
         if(!negotiate_package_id(package)) throw std::runtime_error("Windows Negotiate authentication is unavailable.");
         Request request;request.operation=Operation::RetrieveWindowsCredential;request.ticket=ticket_;wcscpy_s(request.targetSid,sid_.c_str());
-        auto result=call(request);
+        auto result=provider_call(request);
         trace(L"one-use approval consumed; credential received");
         serializedNonce_=ticket_.nonce;ticket_={};
         auto packed=pack_windows_credential(result.windowsCredential,unlockWorkstation_);
@@ -179,14 +328,14 @@ public:
       serialization->cbSerialization=sizeof(UnlockLogon); serialization->rgbSerialization=reinterpret_cast<BYTE*>(buffer);
       *response=CPGSR_RETURN_CREDENTIAL_FINISHED; *icon=CPSI_NONE; return S_OK;
     }
-    return SHStrDupW(L"Wait for the face scan to finish, or select Windows PIN/password.",text);
+    return SHStrDupW(has_approval()?L"Face verified. Press Space or Enter, or interact with the lock screen to continue.":L"Wait for the face scan to finish, or select Windows PIN/password.",text);
   }
   HRESULT STDMETHODCALLTYPE ReportResult(NTSTATUS status,NTSTATUS substatus,wchar_t** text,CREDENTIAL_PROVIDER_STATUS_ICON* icon) override {
     trace(L"Windows result; status="+status_code(status)+L"; substatus="+status_code(substatus));
-    ticket_={};if(text)*text=nullptr;if(icon)*icon=status<0?CPSI_ERROR:CPSI_NONE;
-    if(status<0 && password_unlock_enabled()) {
+    stop_scan();if(text)*text=nullptr;if(icon)*icon=status<0?CPSI_ERROR:CPSI_NONE;
+    if(status<0 && password_backend_enabled()) {
       // Do not repeatedly replay a stale password and risk an account lockout.
-      try {Request r;r.operation=Operation::DeleteWindowsCredential;wcscpy_s(r.targetSid,sid_.c_str());call(r);}catch(...){}
+      try {Request r;r.operation=Operation::DeleteWindowsCredential;wcscpy_s(r.targetSid,sid_.c_str());provider_call(r);}catch(...){}
       if(text)return SHStrDupW(L"Windows rejected face unlock. Use your PIN/password, then save the current account password again in FacePass Settings.",text);
     }
     if(status<0 && text)return SHStrDupW(L"FacePass unlock failed. Use Windows PIN/password; select Scan again to retry.",text);return S_OK;
@@ -212,8 +361,15 @@ public:
     if((scenario!=CPUS_LOGON&&scenario!=CPUS_UNLOCK_WORKSTATION)||GetSystemMetrics(SM_REMOTESESSION))return E_NOTIMPL; scenario_=scenario;return S_OK;
   }
   HRESULT STDMETHODCALLTYPE SetSerialization(const CREDENTIAL_PROVIDER_CREDENTIAL_SERIALIZATION*) override{return E_NOTIMPL;}
-  HRESULT STDMETHODCALLTYPE Advise(ICredentialProviderEvents* e,UINT_PTR c) override {UnAdvise();notifications_->events=e;notifications_->context=c;if(e)e->AddRef();for(auto credential:credentials_)credential->start_automatic();return S_OK;}
-  HRESULT STDMETHODCALLTYPE UnAdvise() override {if(notifications_->events){notifications_->events->Release();notifications_->events=nullptr;}notifications_->context=0;return S_OK;}
+  HRESULT STDMETHODCALLTYPE Advise(ICredentialProviderEvents* e,UINT_PTR c) override {
+    if(e)e->AddRef();if(notifications_->events)notifications_->events->Release();
+    notifications_->events=e;notifications_->context=c;
+    if(e)for(auto credential:credentials_)credential->start_automatic();return S_OK;
+  }
+  HRESULT STDMETHODCALLTYPE UnAdvise() override {
+    if(notifications_->events){notifications_->events->Release();notifications_->events=nullptr;}notifications_->context=0;
+    for(auto credential:credentials_)credential->stop_scan(true);return S_OK;
+  }
   HRESULT STDMETHODCALLTYPE GetFieldDescriptorCount(DWORD* count) override {if(!count)return E_POINTER;*count=FieldCount;return S_OK;}
   HRESULT STDMETHODCALLTYPE GetFieldDescriptorAt(DWORD id,CREDENTIAL_PROVIDER_FIELD_DESCRIPTOR** descriptor) override {
     if(!descriptor)return E_POINTER;*descriptor=nullptr;if(id>=FieldCount)return E_INVALIDARG;
@@ -227,7 +383,7 @@ public:
   }
   HRESULT STDMETHODCALLTYPE GetCredentialCount(DWORD* count,DWORD* selected,BOOL* automatic) override {
     if(!count||!selected||!automatic)return E_POINTER;*count=scenario_==CPUS_INVALID?0:static_cast<DWORD>(credentials_.size());*selected=CREDENTIAL_PROVIDER_NO_DEFAULT;*automatic=FALSE;
-    for(DWORD i=0;i<*count;++i)if(credentials_[i]->ready()){*selected=i;*automatic=TRUE;break;}trace(L"credentials enumerated; automatic="+std::to_wstring(*automatic));return S_OK;
+    for(DWORD i=0;i<*count;++i) {credentials_[i]->refresh_interaction();if(credentials_[i]->ready()){*selected=i;*automatic=TRUE;break;}}trace(L"credentials enumerated; automatic="+std::to_wstring(*automatic));return S_OK;
   }
   HRESULT STDMETHODCALLTYPE GetCredentialAt(DWORD id,ICredentialProviderCredential** credential) override {if(!credential)return E_POINTER;*credential=nullptr;if(id>=credentials_.size())return E_INVALIDARG;*credential=credentials_[id];(*credential)->AddRef();return S_OK;}
   HRESULT STDMETHODCALLTYPE SetUserArray(ICredentialProviderUserArray* users) override {

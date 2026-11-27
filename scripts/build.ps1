@@ -25,7 +25,7 @@ if ($Package) {
   Copy-Item -LiteralPath (Join-Path $taskRoot 'installer') -Destination $taskDist -Recurse -Force
   Copy-Item -LiteralPath (Join-Path $taskRoot 'scripts\start-demo.ps1') -Destination $taskDist -Force
   $taskManifest=Get-ChildItem -LiteralPath $taskDist -File -Recurse | Where-Object Name -ne 'manifest.json' | ForEach-Object { @{ path=$_.FullName.Substring($taskDist.Length+1).Replace('\','/'); sha256=(Get-FileHash -LiteralPath $_.FullName -Algorithm SHA256).Hash; bytes=$_.Length } }
-  @{version='0.3.0'; authenticationStatus='Experimental password-backed face unlock; actual Windows unlock not yet demonstrated'; files=@($taskManifest)} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $taskDist 'manifest.json') -Encoding utf8
+  @{version='0.3.0'; authenticationStatus='Face verification waits for subsequent lock-screen input before requesting Windows sign-in; live key/curtain behavior unverified'; files=@($taskManifest)} | ConvertTo-Json -Depth 4 | Set-Content -LiteralPath (Join-Path $taskDist 'manifest.json') -Encoding utf8
   $taskZip=Join-Path $taskRoot 'dist\FacePass-0.3.0-win-x64.zip'
   Compress-Archive -LiteralPath $taskDist -DestinationPath $taskZip -Force
   Write-Output "Package: $taskZip"

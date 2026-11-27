@@ -3,7 +3,8 @@
 #include <cmath>
 namespace facepass {
 bool valid_config(const Config& c) {
-  return c.version==1 && static_cast<unsigned>(c.mode)<=2 && static_cast<unsigned>(c.profile)<=static_cast<unsigned>(Profile::Instant) && c.camera<=15
+  return c.version==2 && static_cast<unsigned>(c.mode)<=2 && static_cast<unsigned>(c.profile)<=static_cast<unsigned>(Profile::Instant)
+    && static_cast<unsigned>(c.cameraSource)<=static_cast<unsigned>(CameraSource::Both) && c.camera<=15
     && c.attempts>=1 && c.attempts<=10 && c.cooldownSeconds>=5 && c.cooldownSeconds<=600
     && c.timeoutSeconds>=5 && c.timeoutSeconds<=60 && std::isfinite(c.threshold) && c.threshold>=0.363f && c.threshold<=0.85f && c.requireAfterRestart<=1;
 }

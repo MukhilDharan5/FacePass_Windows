@@ -25,8 +25,14 @@ int wmain(int argc,wchar_t** argv) {
       else if(action!=L"--status" || arg==L"--camera") throw std::runtime_error("Specify one action; --camera requires an index");
       else action=arg;
     }
-    if(action==L"--help") { std::wcout<<L"FacePassRecognition [--demo] --status|--manual|--automatic|--off|--enroll|--enroll-session|--scan|--cancel|--delete [--watch] [--camera 0..15]\n--profile instant|convenience|balanced|strict saves a profile with --status (default), --manual, --automatic, or --off.\nInstant accepts the first 2D face match without liveness checks; photos/video can unlock.\n--enroll-session uses a recent native sign-in token and never collects a password.\nStandalone: --preview, --local-enroll, --local-test, --camera-probe\n";return 0; }
+    if(action==L"--help") { std::wcout<<L"FacePassRecognition [--demo] --status|--manual|--automatic|--off|--enroll|--enroll-session|--scan|--cancel|--delete [--watch] [--camera 0..15]\n--profile instant|convenience|balanced|strict saves a profile with --status (default), --manual, --automatic, or --off.\nInstant accepts the first 2D face match without liveness checks; photos/video can unlock.\n--enroll-session uses a recent native sign-in token and never collects a password.\nStandalone: --preview, --local-enroll, --local-test, --camera-probe, --list-cameras\nUnavailable cameras automatically fall back to native Windows virtual cameras, including connected phones.\n";return 0; }
     if(profile && action!=L"--status" && action!=L"--manual" && action!=L"--automatic" && action!=L"--off")throw std::runtime_error("--profile applies to --status, --manual, --automatic, or --off");
+    if(action==L"--list-cameras") {
+      auto names=camera_names();
+      if(names.empty())std::wcout<<L"No cameras are available in this Windows session.\n";
+      for(const auto& name:names)std::wcout<<name<<L'\n';
+      return 0;
+    }
     if(action==L"--capture-probe") {
       std::stop_source stop;size_t pixels=0;Config config;config.mode=Mode::Manual;config.camera=camera;config.timeoutSeconds=5;
       try { supervised_capture(CaptureKind::Preview,config,{},stop.get_token(),{},[&](std::span<const BYTE> bytes){auto image=cv::imdecode(std::vector<BYTE>(bytes.begin(),bytes.end()),cv::IMREAD_COLOR);if(!image.empty()){pixels=image.total();stop.request_stop();}}); }
@@ -35,8 +41,9 @@ int wmain(int argc,wchar_t** argv) {
       std::wcout<<L"PASS: supervised capture returned "<<pixels<<L" preview pixels in memory and stopped. No camera image saved.\n";return 0;
     }
     if(action==L"--preview"||action==L"--camera-probe") {
-      Camera cap(camera); auto frame=cap.read();
-      std::wcout<<L"Camera delivered "<<frame.cols<<L" x "<<frame.rows<<L" BGR pixels.\n";
+      Config config;config.camera=camera;
+      Camera cap(camera,config.cameraSource); auto frame=cap.read();
+      std::wcout<<L"Camera: "<<cap.name()<<L" delivered "<<frame.cols<<L" x "<<frame.rows<<L" BGR pixels.\n";
       if(action==L"--camera-probe") return 0;
       std::wcout<<L"Escape closes camera preview.\n";
       while(true) { cv::imshow("FacePass camera preview - Escape closes",frame); if(cv::waitKey(30)==27) break; frame=cap.read(); } cv::destroyAllWindows(); return 0;
@@ -45,7 +52,7 @@ int wmain(int argc,wchar_t** argv) {
     if(action==L"--local-enroll"||action==L"--local-test") {
       Store store(data_dir(false)/L"standalone",false); auto sid=current_sid(); Config c=store.config(sid); c.mode=Mode::Manual; c.camera=camera;
       Handle auth; if(action==L"--local-enroll") auth=reauthenticate(nullptr);
-      Engine engine(executable_dir()/L"models"); Camera cap(camera);
+      Engine engine(executable_dir()/L"models"); Camera cap(camera,c.cameraSource);
       if(action==L"--local-enroll") { auto t=enroll(cap,engine,c.profile,60,{},progress); store.save(sid,t); std::wcout<<L"\nEnrollment encrypted.\n"; }
       else { auto outcome=recognize(cap,engine,store.load(sid),c,{},progress); std::wcout<<L"\n"<<outcome.message<<L"\nCosine similarity: "<<outcome.similarity<<L'\n'; return outcome.phase==Phase::Recognized ? 0 : 2; }
       return 0;

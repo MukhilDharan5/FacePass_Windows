@@ -4,17 +4,26 @@
 #include <opencv2/opencv.hpp>
 #include <opencv2/objdetect/face.hpp>
 #include <optional>
+#include "camera_backend.hpp"
 
 namespace facepass {
 std::vector<std::wstring> camera_names();
 class Camera {
-  cv::VideoCapture capture_;
-  unsigned index_ = 0;
-  bool delivered_ = false;
-  bool fallback_ = false;
+  struct Attempt { detail::CameraDevice device; int api; unsigned index; };
+  std::unique_ptr<detail::CameraBackend> backend_;
+  std::vector<Attempt> attempts_;
+  size_t next_ = 0;
+  bool virtualsQueued_ = false;
+  CameraSource source_ = CameraSource::Both;
+  detail::CameraDevice selected_,active_;
+  unsigned generation_ = 0;
+  bool open_next();
 public:
-  explicit Camera(unsigned index);
+  explicit Camera(unsigned index,CameraSource source=CameraSource::Both);
+  Camera(unsigned index,std::unique_ptr<detail::CameraBackend> backend,CameraSource source=CameraSource::Both);
   cv::Mat read();
+  unsigned generation() const { return generation_; }
+  const std::wstring& name() const { return active_.name; }
 };
 struct Observation {
   Embedding embedding{};
@@ -27,6 +36,7 @@ struct Observation {
 class Engine {
   cv::Ptr<cv::FaceDetectorYN> detector_;
   cv::Ptr<cv::FaceRecognizerSF> recognizer_;
+  cv::Ptr<cv::CLAHE> contrast_;
 public:
   explicit Engine(const std::filesystem::path& models);
   std::optional<Observation> observe(const cv::Mat&, std::wstring& reason);
