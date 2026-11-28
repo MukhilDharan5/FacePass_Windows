@@ -11,16 +11,17 @@ namespace facepass {
 inline constexpr wchar_t ServiceName[] = L"FacePassService";
 inline constexpr wchar_t ProviderId[] = L"{A528A337-5D76-4B10-89F8-7B476F2BA491}";
 inline constexpr std::uint32_t ProtocolMagic = 0x46505331;
-inline constexpr std::uint32_t ProtocolVersion = 3;
+inline constexpr std::uint32_t ProtocolVersion = 5;
 inline constexpr std::size_t EmbeddingSize = 128;
 inline constexpr std::size_t SampleCount = 7;
 inline constexpr std::size_t PreviewCapacity = 32768;
 enum class Mode : std::uint32_t { Off, Manual, Automatic };
 enum class Profile : std::uint32_t { Convenience, Balanced, Strict, Instant };
+enum class CameraSource : std::uint32_t { Windows, PhoneVirtual, Both };
 enum class Operation : std::uint32_t { Status, Configure, Enroll, Recognize, Cancel, DeleteProfile, ConsumeUnlock, SaveWindowsCredential, DeleteWindowsCredential, RetrieveWindowsCredential };
 enum class Phase : std::uint32_t { Idle, Disabled, Capturing, Challenge, Enrolled, Recognized, Rejected, Error, Cooldown, Cancelled };
 struct Config {
-  std::uint32_t version = 1;
+  std::uint32_t version = 2;
   Mode mode = Mode::Off;
   Profile profile = Profile::Balanced;
   std::uint32_t camera = 0;
@@ -29,6 +30,7 @@ struct Config {
   std::uint32_t timeoutSeconds = 20;
   float threshold = 0.45f;
   std::uint32_t requireAfterRestart = 1;
+  CameraSource cameraSource = CameraSource::Both;
 };
 using Embedding = std::array<float, EmbeddingSize>;
 struct Template {

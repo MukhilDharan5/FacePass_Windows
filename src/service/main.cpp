@@ -9,7 +9,8 @@ SERVICE_STATUS status{};
 std::stop_source stop;
 std::mutex eventsMutex;
 std::condition_variable eventsCv;
-std::deque<std::pair<DWORD,DWORD>> events;
+struct Event { DWORD control,event,session; };
+std::deque<Event> events;
 void report(DWORD state,DWORD error=0) {
   status.dwServiceType=SERVICE_WIN32_OWN_PROCESS; status.dwCurrentState=state; status.dwWin32ExitCode=error;
   status.dwControlsAccepted=state==SERVICE_RUNNING ? SERVICE_ACCEPT_STOP|SERVICE_ACCEPT_SHUTDOWN|SERVICE_ACCEPT_SESSIONCHANGE|SERVICE_ACCEPT_POWEREVENT : 0;
@@ -21,9 +22,9 @@ DWORD WINAPI control(DWORD code,DWORD event,void* data,void*) {
   if(code==SERVICE_CONTROL_STOP||code==SERVICE_CONTROL_SHUTDOWN) { report(SERVICE_STOP_PENDING); stop.request_stop(); eventsCv.notify_all(); }
   else if(code==SERVICE_CONTROL_SESSIONCHANGE&&data) {
     auto notification=static_cast<WTSSESSION_NOTIFICATION*>(data);
-    std::lock_guard lock(eventsMutex); if(events.size()<32) events.emplace_back(event,notification->dwSessionId); eventsCv.notify_one();
-  } else if(code==SERVICE_CONTROL_POWEREVENT&&event==PBT_APMSUSPEND) {
-    std::lock_guard lock(eventsMutex); events.emplace_back(WTS_CONSOLE_DISCONNECT,WTSGetActiveConsoleSessionId()); eventsCv.notify_one();
+    std::lock_guard lock(eventsMutex); events.push_back({code,event,notification->dwSessionId}); eventsCv.notify_one();
+  } else if(code==SERVICE_CONTROL_POWEREVENT && (event==PBT_APMSUSPEND || event==PBT_APMRESUMEAUTOMATIC || event==PBT_APMRESUMESUSPEND)) {
+    std::lock_guard lock(eventsMutex); events.push_back({code,event,0}); eventsCv.notify_one();
   }
   return NO_ERROR;
 }
@@ -39,7 +40,11 @@ void WINAPI service_main(DWORD,wchar_t**) {
     while(!stop.stop_requested()) {
       std::unique_lock lock(eventsMutex);
       eventsCv.wait(lock,[&]{return stop.stop_requested()||!events.empty();});
-      if(!events.empty()) { auto e=events.front(); events.pop_front(); lock.unlock(); controller.session_event(e.first,e.second); }
+      if(!events.empty()) {
+        auto e=events.front(); events.pop_front(); lock.unlock();
+        if(e.control==SERVICE_CONTROL_POWEREVENT) controller.power_event(e.event);
+        else controller.session_event(e.event,e.session);
+      }
     }
     listener.join(); if(serverFailure) std::rethrow_exception(serverFailure);
     report(SERVICE_STOP_PENDING);

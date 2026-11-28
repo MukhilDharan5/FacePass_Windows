@@ -13,6 +13,7 @@
 #define SECURITY_WIN32
 #include <security.h>
 using namespace facepass;
+int camera_fallback_tests();
 namespace {
 int checks=0;
 void check(bool condition,const char* label){++checks;if(!condition)throw std::runtime_error(std::string("FAILED: ")+label);}
@@ -218,13 +219,59 @@ void model_tests(const std::filesystem::path& models) {
   Engine engine(models);std::wstring reason;
   check(!engine.observe(cv::Mat(480,640,CV_8UC3,cv::Scalar(100,100,100)),reason),"blank image yields no face");
   auto fixtures=models.parent_path()/L"tests"/L"fixtures";
-  cv::Mat a=cv::imread(narrow((fixtures/L"lena.jpg").wstring()));check(!a.empty(),"positive fixture loaded");auto first=engine.observe(a,reason);check(first.has_value(),"YuNet landmarks and SFace embedding on fixture");
+  cv::Mat a=cv::imread(narrow((fixtures/L"lena.jpg").wstring()));check(!a.empty(),"positive fixture loaded");auto first=engine.observe(a,reason);if(!first)std::wcerr<<L"Positive fixture observation: "<<reason<<L'\n';check(first.has_value(),"YuNet landmarks and SFace embedding on fixture");
   cv::Mat changed;a.convertTo(changed,-1,0.85,15);auto second=engine.observe(changed,reason);check(second.has_value(),"lighting-varied fixture detected");
   check(cosine(first->embedding,second->embedding)>0.70f,"same face retained under light variation");
   cv::Mat unknown=cv::imread(narrow((fixtures/L"unknown.jpg").wstring()));check(!unknown.empty(),"unknown fixture loaded");cv::resize(unknown,unknown,{640,602});auto other=engine.observe(unknown,reason);if(!other)std::wcerr<<L"Unknown fixture observation: "<<reason<<L'\n';check(other.has_value(),"different face detected");
   auto similarity=cosine(first->embedding,other->embedding);std::cout<<"Different-face cosine: "<<similarity<<'\n';check(similarity<0.363f,"different fixture identity rejected");
   cv::Mat doubled;cv::hconcat(a,a,doubled);check(!engine.observe(doubled,reason),"multiple faces rejected");
   cv::Mat lowQuality=cv::imread(narrow((fixtures/L"messi5.jpg").wstring()));cv::resize(lowQuality,lowQuality,{},5,5,cv::INTER_CUBIC);check(!engine.observe(lowQuality,reason),"insufficient face quality is rejected");
+  for(double exposure:{0.50,0.35,0.25,0.18}) {
+    cv::Mat dim;a.convertTo(dim,-1,exposure);auto observed=engine.observe(dim,reason);
+    if(!observed)std::wcerr<<L"Dim fixture ("<<exposure<<L"): "<<reason<<L'\n';
+    check(observed.has_value(),"low-light face detected");
+    const auto score=cosine(first->embedding,observed->embedding);
+    std::cout<<"Low-light exposure "<<exposure<<", cosine: "<<score<<'\n';
+    check(score>=0.55f,"low-light face retains identity at the Strict threshold");
+    cv::Mat dimUnknown;unknown.convertTo(dimUnknown,-1,exposure);auto stranger=engine.observe(dimUnknown,reason);
+    check(!stranger||cosine(first->embedding,stranger->embedding)<0.363f,"low-light correction cannot match the different fixture identity");
+    cv::Mat dimPair;doubled.convertTo(dimPair,-1,exposure);
+    auto pair=engine.observe(dimPair,reason);if(pair||reason!=L"Only one person may be in view.")std::wcerr<<L"Dim pair ("<<exposure<<L"): "<<reason<<L'\n';
+    check(!pair&&reason==L"Only one person may be in view.","low-light multiple faces remain rejected");
+  }
+  cv::Mat dark,blurred;a.convertTo(dark,-1,0.01);check(!engine.observe(dark,reason),"near-black image remains unusable");
+  cv::GaussianBlur(a,blurred,{51,51},12);blurred.convertTo(blurred,-1,0.25);check(!engine.observe(blurred,reason),"blurred low-light face remains rejected");
+  for(int level:{0,8,25})check(!engine.observe(cv::Mat(480,640,CV_8UC3,cv::Scalar::all(level)),reason),"flat dark image cannot become a face");
+  for(const auto& invalid:{cv::Mat{},cv::Mat(480,640,CV_8UC1),cv::Mat(480,640,CV_32FC3),cv::Mat(40,40,CV_8UC3)})
+    check(!engine.observe(invalid,reason),"invalid input is rejected before preprocessing");
+  cv::Mat hd,square;cv::resize(a,square,{720,720});cv::copyMakeBorder(square,hd,0,0,280,280,cv::BORDER_CONSTANT,cv::Scalar::all(100));
+  auto hdFace=engine.observe(hd,reason);check(hdFace.has_value(),"wide HD camera frame is detected with scaled landmarks");
+  check(cosine(first->embedding,hdFace->embedding)>=0.70f,"HD detection retains source-resolution identity detail");
+  for(const auto& image:{a,hd}) {
+    constexpr int repeats=6;const auto began=std::chrono::steady_clock::now();
+    for(int i=0;i<repeats;++i)check(engine.observe(image,reason).has_value(),"repeated frame inference remains valid");
+    std::cout<<"Mean detection + embedding ("<<image.cols<<'x'<<image.rows<<"): "
+      <<std::chrono::duration<double,std::milli>(std::chrono::steady_clock::now()-began).count()/repeats<<" ms\n";
+  }
+  class FixtureCamera final : public detail::CameraBackend {
+    std::vector<cv::Mat> frames_;
+    size_t next_=0;
+  public:
+    explicit FixtureCamera(std::vector<cv::Mat> frames):frames_(std::move(frames)){}
+    std::vector<detail::CameraDevice> devices() override {return {{0,L"Fixture camera",L"fixture-camera",false,{}}};}
+    bool open(unsigned index,int api) override {return index==0&&api==cv::CAP_MSMF;}
+    bool read(cv::Mat& frame) override {if(next_==frames_.size())throw std::runtime_error("Recognition requested an unexpected extra fixture frame");frame=frames_[next_++];return true;}
+    void release() override {}
+  };
+  cv::Mat dim;a.convertTo(dim,-1,0.18);
+  Camera camera(0,std::make_unique<FixtureCamera>(std::vector<cv::Mat>{cv::Mat::zeros(a.size(),a.type()),dim}));
+  Template enrolled;enrolled.samples.assign(SampleCount,first->embedding);Config config;config.profile=Profile::Instant;config.threshold=0.55f;
+  unsigned progressCalls=0,previews=0;
+  const auto recognized=recognize(camera,engine,enrolled,config,{},[&](const Outcome&){++progressCalls;},[&](const cv::Mat&){++previews;});
+  check(recognized.phase==Phase::Recognized&&recognized.similarity>=config.threshold,"Instant recognizes the first matching low-light frame after an empty frame");
+  check(progressCalls==1&&previews==1,"successful Instant recognition returns before optional preview work");
+  std::stop_source stopped;stopped.request_stop();
+  check(recognize(camera,engine,enrolled,config,stopped.get_token(),{},{}).phase==Phase::Cancelled,"cancelled recognition consumes no more camera frames");
 }
 void ipc_tests() {
   Request r;auto original=call(r,true);check(original.backendAvailable==0,"demo server never offers credential backend");
@@ -254,5 +301,5 @@ void ipc_tests() {
 }
 }
 int wmain(int argc,wchar_t** argv) {
-  try{if(argc==3&&std::wstring(argv[1])==L"--provider")provider_tests(argv[2]);else if(argc==3&&std::wstring(argv[1])==L"--models")model_tests(argv[2]);else if(argc==2&&std::wstring(argv[1])==L"--ipc")ipc_tests();else core_tests();std::cout<<"PASS: "<<checks<<" checks\n";return 0;}catch(const std::exception& ex){std::cerr<<ex.what()<<" (after "<<checks<<" checks)\n";return 1;}
+  try{if(argc==3&&std::wstring(argv[1])==L"--provider")provider_tests(argv[2]);else if(argc==3&&std::wstring(argv[1])==L"--models")model_tests(argv[2]);else if(argc==2&&std::wstring(argv[1])==L"--ipc")ipc_tests();else if(argc==2&&std::wstring(argv[1])==L"--camera-fallback")checks=camera_fallback_tests();else core_tests();std::cout<<"PASS: "<<checks<<" checks\n";return 0;}catch(const std::exception& ex){std::cerr<<ex.what()<<" (after "<<checks<<" checks)\n";return 1;}
 }

@@ -17,7 +17,7 @@ target_include_directories(facepass_common PUBLIC include)
 target_link_libraries(facepass_common PUBLIC advapi32 crypt32 bcrypt secur32 credui ole32 shell32)
 add_library(facepass_vision STATIC src/camera/camera.cpp src/camera/supervisor.cpp src/recognition/engine.cpp src/liveness/liveness.cpp)
 target_include_directories(facepass_vision PUBLIC ${OpenCV_INCLUDE_DIRS})
-target_link_libraries(facepass_vision PUBLIC facepass_common ${OpenCV_LIBS} mfplat mf mfuuid)
+target_link_libraries(facepass_vision PUBLIC facepass_common ${OpenCV_LIBS} mfplat mf mfuuid cfgmgr32 strmiids oleaut32)
 add_executable(FaceUnlockService src/service/main.cpp src/service/controller.cpp)
 target_link_libraries(FaceUnlockService PRIVATE facepass_vision wtsapi32)
 add_executable(FaceUnlockSettings WIN32 src/settings/main.cpp resources/app.rc resources/app.manifest)
@@ -33,21 +33,31 @@ add_library(FacePassAuth SHARED src/authentication/package.cpp src/authenticatio
 target_link_libraries(FacePassAuth PRIVATE facepass_common wtsapi32 netapi32)
 set_target_properties(FacePassAuth PROPERTIES PREFIX "")
 enable_testing()
-add_executable(FacePassTests tests/tests.cpp)
+add_executable(FacePassTests tests/tests.cpp tests/camera-tests.cpp)
 target_link_libraries(FacePassTests PRIVATE facepass_vision uuid shlwapi)
 add_test(NAME policy_storage_liveness COMMAND FacePassTests)
 add_test(NAME provider_contract COMMAND FacePassTests --provider $<TARGET_FILE:FaceUnlockProvider>)
 add_test(NAME model_inference COMMAND FacePassTests --models ${CMAKE_SOURCE_DIR}/models)
+add_test(NAME camera_fallback COMMAND FacePassTests --camera-fallback)
 add_test(NAME settings_smoke COMMAND FaceUnlockSettings --selftest)
 add_executable(FacePassAuthTests tests/auth-tests.cpp src/authentication/package.cpp)
 target_compile_definitions(FacePassAuthTests PRIVATE FACEPASS_AUTH_TESTING)
 target_link_libraries(FacePassAuthTests PRIVATE facepass_common wtsapi32 netapi32)
 add_test(NAME authentication_contract COMMAND FacePassAuthTests $<TARGET_FILE:FacePassAuth>)
+add_executable(FacePassAutomaticTests tests/automatic-tests.cpp src/service/controller.cpp)
+target_compile_definitions(FacePassAutomaticTests PRIVATE FACEPASS_AUTOMATIC_TESTING)
+target_link_libraries(FacePassAutomaticTests PRIVATE facepass_vision wtsapi32 uuid shlwapi)
+add_test(NAME automatic_unlock_lifecycle COMMAND FacePassAutomaticTests)
 add_test(NAME script_syntax COMMAND powershell -NoProfile -ExecutionPolicy Bypass -File ${CMAKE_SOURCE_DIR}/tests/scripts.ps1)
-foreach(t FaceUnlockService FaceUnlockSettings FacePassRecognition FacePassCapture FacePassTests)
-  add_custom_command(TARGET ${t} POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:opencv_world> $<TARGET_FILE_DIR:${t}>
-    COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/models $<TARGET_FILE_DIR:${t}>/models)
+add_custom_target(facepass_runtime
+  COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:FacePassCapture>
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different $<TARGET_FILE:opencv_world> $<TARGET_FILE_DIR:FacePassCapture>
+  COMMAND ${CMAKE_COMMAND} -E copy_directory ${CMAKE_SOURCE_DIR}/models $<TARGET_FILE_DIR:FacePassCapture>/models
+  VERBATIM)
+foreach(t FaceUnlockService FaceUnlockSettings FacePassRecognition FacePassCapture FacePassTests FacePassAutomaticTests)
+  # All executables share an output directory; stage once to avoid parallel
+  # post-build copies racing while replacing the same runtime/model files.
+  add_dependencies(${t} facepass_runtime)
 endforeach()
 install(TARGETS FaceUnlockService FaceUnlockSettings FacePassRecognition FacePassCapture FaceUnlockProvider FacePassAuth RUNTIME DESTINATION . LIBRARY DESTINATION .)
 install(FILES $<TARGET_FILE:opencv_world> DESTINATION .)

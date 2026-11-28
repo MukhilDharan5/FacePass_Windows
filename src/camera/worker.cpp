@@ -22,8 +22,12 @@ int wmain(int argc,wchar_t** argv) {
     };
     std::stop_source stop;
     std::jthread monitor([&](std::stop_token ending){while(!ending.stop_requested())if(WaitForSingleObject(cancel.get(),50)==WAIT_OBJECT_0){stop.request_stop();break;}});
+    auto lastPreview=std::chrono::steady_clock::time_point{};
     auto preview=[&](const cv::Mat& frame) {
       if(!shared->previewAllowed)return;
+      const auto now=std::chrono::steady_clock::now();
+      if(now-lastPreview<std::chrono::milliseconds(100))return;
+      lastPreview=now;
       cv::Mat small;cv::resize(frame,small,{320,240});std::vector<BYTE> jpeg;
       cv::imencode(".jpg",small,jpeg,{cv::IMWRITE_JPEG_QUALITY,60});
       if(jpeg.size()>PreviewCapacity)return;
@@ -32,20 +36,27 @@ int wmain(int argc,wchar_t** argv) {
       ReleaseMutex(mutex.get());SetEvent(event.get());
     };
     try {
-      Camera camera(shared->config.camera);
+      Camera camera(shared->config.camera,shared->config.cameraSource);
+      auto cameraProgress=[&](const Outcome& outcome) {
+        auto reported=outcome;reported.message+=L" Camera: "+camera.name()+L".";update(reported);
+      };
       if(shared->kind==CaptureKind::Preview) {
-        update({Phase::Capturing,0,0,L"Camera preview is active. Close the preview to release the camera."});
-        while(!stop.stop_requested()){preview(camera.read());std::this_thread::sleep_for(std::chrono::milliseconds(100));}
+        unsigned cameraGeneration=0;
+        while(!stop.stop_requested()){
+          auto frame=camera.read();
+          if(cameraGeneration!=camera.generation()){cameraGeneration=camera.generation();cameraProgress({Phase::Capturing,0,0,L"Camera preview is active. Close the preview to release the camera."});}
+          preview(frame);std::this_thread::sleep_for(std::chrono::milliseconds(100));
+        }
         update({Phase::Cancelled,0,0,L"Preview closed. Camera released."},true);
       } else {
         Engine engine(executable_dir()/L"models");
         if(shared->kind==CaptureKind::Enroll) {
-          auto result=enroll(camera,engine,shared->config.profile,std::max(45u,shared->config.timeoutSeconds),stop.get_token(),[&](const Outcome& o){update(o);},preview);
+          auto result=enroll(camera,engine,shared->config.profile,std::max(45u,shared->config.timeoutSeconds),stop.get_token(),cameraProgress,preview);
           update({Phase::Enrolled,0,100,L"Seven quality samples captured."},true,&result);
           for(auto& sample:result.samples)SecureZeroMemory(sample.data(),sizeof(sample));
         } else {
           Template enrolled;enrolled.samples.assign(shared->input.begin(),shared->input.begin()+shared->inputCount);
-          auto outcome=recognize(camera,engine,enrolled,shared->config,stop.get_token(),[&](const Outcome& o){update(o);},preview);
+          auto outcome=recognize(camera,engine,enrolled,shared->config,stop.get_token(),cameraProgress,preview);
           for(auto& sample:enrolled.samples)SecureZeroMemory(sample.data(),sizeof(sample));
           update(outcome,true);
         }

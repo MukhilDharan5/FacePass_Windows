@@ -12,7 +12,7 @@
 #include <sstream>
 using namespace facepass;
 namespace {
-enum Id {NavOverview=100,NavAuth,NavFace,NavAdvanced,ToggleTheme=110,Apply=200,Enroll=201,Delete=202,Scan=203,Cancel=204,Preview=205,Refresh=206,Recovery=207,Logs=208,SessionEnroll=209,SavePassword=210,RemovePassword=211,ModeControl=300,ProfileControl=301,CameraControl=302,ThresholdControl=303,AttemptsControl=304,CooldownControl=305,TimeoutControl=306,RestartControl=307};
+enum Id {NavOverview=100,NavAuth,NavFace,NavAdvanced,ToggleTheme=110,Apply=200,Enroll=201,Delete=202,Scan=203,Cancel=204,Preview=205,Refresh=206,Recovery=207,Logs=208,SessionEnroll=209,SavePassword=210,RemovePassword=211,ModeControl=300,ProfileControl=301,CameraControl=302,ThresholdControl=303,AttemptsControl=304,CooldownControl=305,TimeoutControl=306,RestartControl=307,CameraSourceControl=308};
 LRESULT CALLBACK capture_window_proc(HWND,UINT,WPARAM,LPARAM);
 struct App {
   HWND window=nullptr; HINSTANCE instance=nullptr;
@@ -59,13 +59,13 @@ struct App {
       label(response.passwordBackedBackend?L"Face unlock: enabled using Windows authentication":response.backendAvailable?L"Passwordless backend: enabled and loaded (local console unlock)":L"Face unlock: not enabled",246,206,640,32);
       label(demo?L"Service target: per-user demonstration server":L"Service target: Windows service (LocalService)",246,253);
       label(std::wstring(L"Face profile: ")+(response.enrolled?L"enrolled and encrypted":L"not enrolled"),246,295);
-      label(std::wstring(L"Activation: ")+(c.mode==Mode::Off?L"Off":c.mode==Mode::Manual?L"Manual":L"Automatic on console session lock"),246,337);
+      label(std::wstring(L"Activation: ")+(c.mode==Mode::Off?L"Off":c.mode==Mode::Manual?L"Manual":L"Automatic on console lock and resume"),246,337);
       label(std::wstring(L"Camera activity: ")+(response.cameraActive?L"capturing":L"idle"),246,379);
       label(L"RGB webcam recognition is vulnerable to replay and synthetic video.",246,435,640,48);
       button(L"Refresh status",Refresh,246,515);button(L"Test recognition",Scan,414,515);button(L"Cancel capture",Cancel,582,515);
     } else if(page==1) {
       label(L"Activation mode",246,124);combo(ModeControl,{L"Off",L"Manual",L"Automatic"},static_cast<int>(c.mode),246,154,295);
-      label(L"Manual scans when selected. Automatic scans on a console lock event.",246,200,640,44);
+      label(L"After face verification, press Space/Enter or interact to continue.\nAutomatic scans on lock/resume; Manual on selection. Off disables scans.",246,200,640,44);
       label(L"Failed attempt limit",246,268,240);control(L"EDIT",std::to_wstring(c.attempts),AttemptsControl,550,263,110,30,ES_NUMBER|WS_TABSTOP);
       label(L"Cooldown (seconds)",246,312,240);control(L"EDIT",std::to_wstring(c.cooldownSeconds),CooldownControl,550,307,110,30,ES_NUMBER|WS_TABSTOP);
       label(L"Scan timeout (seconds)",246,356,240);control(L"EDIT",std::to_wstring(c.timeoutSeconds),TimeoutControl,550,351,110,30,ES_NUMBER|WS_TABSTOP);
@@ -76,19 +76,20 @@ struct App {
       button(L"Save preferences",Apply,246,536,180);
       label(L"Face unlock submits your saved local or Microsoft-account password to Windows.\nFor a local account use .\\username and your password, not your PIN.",246,584,640,46);
     } else if(page==2) {
-      label(L"Camera",246,124,170);
+      label(L"Camera source",246,124,190);combo(CameraSourceControl,{L"Windows camera only",L"Phone virtual camera only",L"Both"},static_cast<int>(c.cameraSource),450,120,420);
+      label(L"Preferred camera",246,170,190);
       auto names=camera_names();if(names.empty())names={L"Camera 0 (no camera enumerated)"};
       while(names.size()<=c.camera)names.push_back(L"Camera "+std::to_wstring(names.size()));
-      combo(CameraControl,names,static_cast<int>(c.camera),450,120,420);
-      label(L"Recognition profile",246,175,190);combo(ProfileControl,{L"Convenience (temporal only)",L"Balanced (short random challenge)",L"Strict (random multi-step challenge)",L"Instant (2D match; no challenges)"},static_cast<int>(c.profile),450,172,420);
-      label(L"Cosine threshold (0.363 - 0.85)",246,228,290);
-      std::wostringstream threshold;threshold<<std::fixed<<std::setprecision(3)<<c.threshold;control(L"EDIT",threshold.str(),ThresholdControl,620,223,120,30,WS_TABSTOP);
-      label(L"Instant unlocks on the first 2D match; a photo or video can unlock.\nOther profiles use Strict for Windows unlock. Higher thresholds reject more faces.",246,269,640,54);
-      button(L"Save preferences",Apply,246,332,180);button(L"Camera preview",Preview,444,332,180);
-      button(response.enrolled?L"Re-enroll face":L"Enroll face",Enroll,246,394,180);button(L"Delete profile",Delete,444,394,180);
-      button(L"Use recent sign-in",SessionEnroll,642,394,200);
-      button(L"Test recognition",Scan,246,451,180);button(L"Cancel capture",Cancel,444,451,180);
-      label(L"Use recent sign-in to enroll within two minutes of native Windows sign-in,\nor Enroll face for transient password verification. Follow the live preview.\nSeven encrypted samples are saved; camera images remain in memory.",246,517,660,78);
+      combo(CameraControl,names,static_cast<int>(c.camera),450,166,420);
+      label(L"Recognition profile",246,215,190);combo(ProfileControl,{L"Convenience (temporal only)",L"Balanced (short random challenge)",L"Strict (random multi-step challenge)",L"Instant (2D match; no challenges)"},static_cast<int>(c.profile),450,212,420);
+      label(L"Cosine threshold (0.363 - 0.85)",246,263,290);
+      std::wostringstream threshold;threshold<<std::fixed<<std::setprecision(3)<<c.threshold;control(L"EDIT",threshold.str(),ThresholdControl,620,258,120,30,WS_TABSTOP);
+      label(L"Windows camera covers built-in and USB cameras. Phone virtual camera uses\nWindows' connected phone camera. The preferred device is used when it matches\nthe source; Both allows fallback to the other camera type.",246,302,640,56);
+      button(L"Save preferences",Apply,246,368,180);button(L"Camera preview",Preview,444,368,180);
+      button(response.enrolled?L"Re-enroll face":L"Enroll face",Enroll,246,420,180);button(L"Delete profile",Delete,444,420,180);
+      button(L"Use recent sign-in",SessionEnroll,642,420,200);
+      button(L"Test recognition",Scan,246,472,180);button(L"Cancel capture",Cancel,444,472,180);
+      label(L"Use recent sign-in to enroll within two minutes of native Windows sign-in,\nor Enroll face for transient password verification. Follow the live preview.\nSeven encrypted samples are saved; camera images remain in memory.",246,514,660,78);
     } else {
       label(L"Service and security diagnostics",246,124);
       label(L"Face unlock: encrypted local or Microsoft-account password; Windows authenticates.\nIPC: verified Windows service; OS client identity; one-use face approval.\nStorage: encrypted templates and optional encrypted account password.\nCapture: supervised worker; cancellation and hard capture deadline.\nRecognition: Instant skips liveness; other unlock profiles use Strict challenges.\nConsole unlock only; boot logon and RDP are unsupported.",246,174,640,186);
@@ -125,7 +126,7 @@ struct App {
     try {
       Config c=response.config;
       if(page==1) {c.mode=static_cast<Mode>(SendMessageW(byId.at(ModeControl),CB_GETCURSEL,0,0));c.attempts=std::stoul(value(AttemptsControl));c.cooldownSeconds=std::stoul(value(CooldownControl));c.timeoutSeconds=std::stoul(value(TimeoutControl));c.requireAfterRestart=SendMessageW(byId.at(RestartControl),BM_GETCHECK,0,0)==BST_CHECKED;}
-      if(page==2) {c.camera=static_cast<unsigned>(SendMessageW(byId.at(CameraControl),CB_GETCURSEL,0,0));c.profile=static_cast<Profile>(SendMessageW(byId.at(ProfileControl),CB_GETCURSEL,0,0));c.threshold=std::stof(value(ThresholdControl));}
+      if(page==2) {c.cameraSource=static_cast<CameraSource>(SendMessageW(byId.at(CameraSourceControl),CB_GETCURSEL,0,0));c.camera=static_cast<unsigned>(SendMessageW(byId.at(CameraControl),CB_GETCURSEL,0,0));c.profile=static_cast<Profile>(SendMessageW(byId.at(ProfileControl),CB_GETCURSEL,0,0));c.threshold=std::stof(value(ThresholdControl));}
       if(!valid_config(c))throw std::runtime_error("Use attempts 1..10, cooldown 5..600, timeout 5..60, and threshold 0.363..0.85.");
       perform(Operation::Configure,false,c);
     }catch(const std::exception& ex){MessageBoxW(window,widen(ex.what()).c_str(),L"Invalid preferences",MB_OK|MB_ICONWARNING);}
@@ -219,7 +220,7 @@ LRESULT CALLBACK window_proc(HWND window,UINT message,WPARAM w,LPARAM l) {
   case WM_TIMER:if(w==1&&!app->busy&&!app->previewing)app->perform(Operation::Status,true);return 0;
   case WM_APP+2:{
     KillTimer(window,1);bool rerender=!app->configured;
-    {std::lock_guard lock(app->mutex);if(app->pendingOk){rerender=rerender||app->response.enrolled!=app->pending.enrolled||app->response.credentialSaved!=app->pending.credentialSaved||app->response.passwordBackedBackend!=app->pending.passwordBackedBackend||app->response.backendAvailable!=app->pending.backendAvailable||app->response.config.mode!=app->pending.config.mode;app->response=app->pending;app->status=app->response.message;app->configured=true;}else app->status=app->error+L". Start the service or the per-user demo server.";}
+    {std::lock_guard lock(app->mutex);if(app->pendingOk){rerender=rerender||app->response.enrolled!=app->pending.enrolled||app->response.credentialSaved!=app->pending.credentialSaved||app->response.passwordBackedBackend!=app->pending.passwordBackedBackend||app->response.backendAvailable!=app->pending.backendAvailable||app->response.config.mode!=app->pending.config.mode||app->response.config.cameraSource!=app->pending.config.cameraSource||app->response.config.camera!=app->pending.config.camera||app->response.config.profile!=app->pending.config.profile||app->response.config.threshold!=app->pending.config.threshold;app->response=app->pending;app->status=app->response.message;app->configured=true;}else app->status=app->error+L". Start the service or the per-user demo server.";}
     app->busy=false;if(rerender)app->render();InvalidateRect(window,nullptr,FALSE);
     if(app->response.previewSize)app->show_capture({app->response.preview.data(),app->response.previewSize});
     if(!app->response.cameraActive && app->captureWindow && !app->previewing)DestroyWindow(app->captureWindow);

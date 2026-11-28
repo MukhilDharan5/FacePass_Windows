@@ -67,6 +67,7 @@ bool valid_request(const Hello& h,const Request& r,std::uint64_t now) {
     && r.nonce==h.nonce && now<=h.expires && static_cast<unsigned>(r.operation)<=static_cast<unsigned>(Operation::RetrieveWindowsCredential)
     && std::find(std::begin(r.targetSid),std::end(r.targetSid),L'\0')!=std::end(r.targetSid)
     && (r.operation!=Operation::Configure||valid_config(r.config))
+    && (r.operation==Operation::Cancel || r.lockEpoch==0)
     && (consume ? valid_ticket(r.ticket,now) && std::wstring(r.targetSid)==r.ticket.sid : r.ticket.version==0)
     && (r.operation==Operation::SaveWindowsCredential ? valid_windows_credential(r.windowsCredential) : r.windowsCredential.version==0);
 }
@@ -81,14 +82,18 @@ bool authorize(const Caller& c,Operation op,const std::wstring& target) {
   return (op!=Operation::Enroll&&op!=Operation::SaveWindowsCredential)||c.fresh;
 }
 void set_message(Response& r,const std::wstring& message) { wcsncpy_s(r.message,message.c_str(),_TRUNCATE); }
-Response call(const Request& request,bool demo,HANDLE enrollmentToken) {
+Response call(const Request& request,bool demo,HANDLE enrollmentToken,std::stop_token stop) {
   auto name=pipe_name(demo);
   Handle pipe;
   {
     Impersonation authenticated(enrollmentToken);
     pipe.reset(CreateFileW(name.c_str(),FILE_READ_DATA|FILE_WRITE_DATA|FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES|SYNCHRONIZE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED|SECURITY_SQOS_PRESENT|SECURITY_IMPERSONATION,nullptr));
     if(!pipe&&GetLastError()==ERROR_PIPE_BUSY) {
-      if(!WaitNamedPipeW(name.c_str(),2000)) fail("Wait for FacePass pipe");
+      const auto deadline=GetTickCount64()+2000;
+      while(!stop.stop_requested() && GetTickCount64()<deadline && !WaitNamedPipeW(name.c_str(),50)) {
+        if(GetLastError()!=ERROR_SEM_TIMEOUT) fail("Wait for FacePass pipe");
+      }
+      if(stop.stop_requested()) throw std::runtime_error("FacePass request cancelled");
       pipe.reset(CreateFileW(name.c_str(),FILE_READ_DATA|FILE_WRITE_DATA|FILE_READ_ATTRIBUTES|FILE_WRITE_ATTRIBUTES|SYNCHRONIZE,0,nullptr,OPEN_EXISTING,FILE_FLAG_OVERLAPPED|SECURITY_SQOS_PRESENT|SECURITY_IMPERSONATION,nullptr));
     }
   }
@@ -97,17 +102,18 @@ Response call(const Request& request,bool demo,HANDLE enrollmentToken) {
   DWORD mode=PIPE_READMODE_MESSAGE;
   if(!SetNamedPipeHandleState(pipe.get(),&mode,nullptr,nullptr)) fail("Set pipe mode");
   Hello hello{};
-  if(!transfer(pipe.get(),&hello,sizeof(hello),false,2500)) throw std::runtime_error("Service handshake timed out");
+  if(!transfer(pipe.get(),&hello,sizeof(hello),false,2500,stop)) throw std::runtime_error("Service handshake timed out or cancelled");
   Request r=request; r.nonce=hello.nonce;
   if(!valid_request(hello,r,unix_millis())) throw std::runtime_error("Invalid or expired service handshake");
   // Keep the authenticated impersonation context through the write as well as pipe creation.
-  { Impersonation authenticated(enrollmentToken); if(!transfer(pipe.get(),&r,sizeof(r),true,2000)) throw std::runtime_error("Service request failed"); }
+  { Impersonation authenticated(enrollmentToken); if(!transfer(pipe.get(),&r,sizeof(r),true,2000,stop)) throw std::runtime_error("Service request failed or cancelled"); }
   Response response{};
-  if(!transfer(pipe.get(),&response,sizeof(response),false,2500)) throw std::runtime_error("Service response timed out");
+  if(!transfer(pipe.get(),&response,sizeof(response),false,2500,stop)) throw std::runtime_error("Service response timed out or cancelled");
   // Bounded acknowledgement lets the server disconnect without dropping a buffered response.
-  DWORD ack=ProtocolMagic; transfer(pipe.get(),&ack,sizeof(ack),true,500);
+  DWORD ack=ProtocolMagic; transfer(pipe.get(),&ack,sizeof(ack),true,500,stop);
   if(response.magic!=ProtocolMagic||response.version!=ProtocolVersion||response.nonce!=hello.nonce
-    ||response.backendAvailable>1||response.passwordBackedBackend>1||response.credentialSaved>1||!valid_config(response.config)||response.enrolled>1||response.cameraActive>1||response.progress>100||static_cast<unsigned>(response.phase)>static_cast<unsigned>(Phase::Cancelled)
+    ||response.backendAvailable>1||response.passwordBackedBackend>1||response.credentialSaved>1||response.unlockEligible>1||response.automaticAttempted>1||!valid_config(response.config)||response.enrolled>1||response.cameraActive>1||response.progress>100||static_cast<unsigned>(response.phase)>static_cast<unsigned>(Phase::Cancelled)
+    ||(response.unlockEligible ? response.lockEpoch==0 : response.lockEpoch!=0)
     ||(response.ticket.version!=0 && !valid_ticket(response.ticket,unix_millis()))
     ||response.previewSize>PreviewCapacity
     ||std::find(std::begin(response.message),std::end(response.message),L'\0')==std::end(response.message)
